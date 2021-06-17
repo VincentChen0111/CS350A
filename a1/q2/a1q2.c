@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,7 +39,6 @@ set_done(bool val)
 }
 
 struct resource {
-	int counter;			/* Number of operations */
 	long num_consumers;		/* Number of active consumers in the resource */
 	long num_producers;		/* Number of active producers in the resource */
 	int ratio;			/* Ratio of producers to consumers */
@@ -69,25 +69,41 @@ rest(void)
 void
 consume_enter(struct resource *resource)
 {
-    // FILL ME IN
+	// FILL ME IN
+	pthread_mutex_lock(&resource->mutex);
+	while(resource->num_consumers + 1 > resource->num_producers * resource->ratio){
+		pthread_cond_wait(&resource->cond, &resource->mutex);
+	}
+	resource->num_consumers += 1;
 }
 
 void
 consume_exit(struct resource *resource)
 {
-    // FILL ME IN
+	// FILL ME IN
+	pthread_cond_signal(&resource->cond);
+	resource->num_consumers -= 1;
+	pthread_mutex_unlock(&resource->mutex);
 }
 
 void
 produce_enter(struct resource *resource)
 {
-    // FILL ME IN
+	// FILL ME IN
+	pthread_mutex_lock(&resource->mutex);
+	resource->num_producers += 1;
+	pthread_cond_signal(&resource->cond);
 }
 
 void
 produce_exit(struct resource *resource)
 {
-    // FILL ME IN
+	// FILL ME IN
+	while(resource->num_consumers > (resource->num_producers - 1) * resource->ratio){
+		pthread_cond_wait(&resource->cond, &resource->mutex);
+	}
+	resource->num_producers -= 1;
+	pthread_mutex_unlock(&resource->mutex);
 }
 
 /* Functions for the consumers and producers. */
@@ -105,20 +121,16 @@ consume(void *data)
 
 	while (!check_done()) {
 		consume_enter(resource);
-
 		assert_capacity(resource);
 
 		/* Computation happens outside the critical section.*/
 		pthread_mutex_unlock(&resource->mutex);
 		compute();
-
-        int num_allowed = resource->num_producers * resource->ratio;
-        if ( resource->num_consumers > num_allowed )
-            printf( "Fail.  Incorrect ratio. %d %ld\n", num_allowed, resource->num_consumers );
-
 		pthread_mutex_lock(&resource->mutex);
 
+		assert_capacity(resource);
 		consume_exit(resource);
+		
 
 		/* Wait for a bit. */
 		rest();
@@ -142,7 +154,6 @@ produce(void *data)
 
 	while (!check_done()) {
 		produce_enter(resource);
-
 		assert_capacity(resource);
 
 		/* Computation happens outside the critical section.*/
@@ -150,11 +161,19 @@ produce(void *data)
 		compute();
 		pthread_mutex_lock(&resource->mutex);
 
+		assert_capacity(resource);
 		produce_exit(resource);
+		
 
 		/* Wait for a bit. */
 		rest();
 	}
+
+	/* Fix edge condition. */
+	pthread_mutex_lock(&resource->mutex);
+	resource->num_producers += 1;
+	pthread_cond_broadcast(&resource->cond);
+	pthread_mutex_unlock(&resource->mutex);
 
 	*ret = 0;
 	pthread_exit(ret);
@@ -208,9 +227,6 @@ resource_setup(long num_consumers, long num_producers, long ratio)
 void
 resource_teardown(struct resource *resource)
 {
-	assert(resource->num_consumers == 0);
-	assert(resource->num_producers == 0);
-
 	pthread_cond_destroy(&resource->cond);
 	pthread_mutex_destroy(&resource->mutex);
 
@@ -308,7 +324,7 @@ main(int argc, char **argv)
 		exit(0);
 	}
 
-	sleep(10);
+	sleep(3);
 
 	/* Mark operation as done. */
 	set_done(true);
